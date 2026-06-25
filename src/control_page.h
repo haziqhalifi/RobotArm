@@ -25,7 +25,13 @@ const char CONTROL_PAGE[] PROGMEM = R"HTML(
     .stick{width:34%;aspect-ratio:1;border-radius:50%;position:absolute;left:33%;top:33%;z-index:2;background:linear-gradient(145deg,#55cfff,#0876ad);box-shadow:0 8px 18px #02070c;pointer-events:none}
     .axis{display:flex;justify-content:space-between;color:#9fb2c9;font-size:.8rem;margin:8px auto 0;max-width:230px}
     .joint-head{display:flex;justify-content:space-between;gap:10px;font-weight:700;margin-bottom:8px}
+    .pose-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+    .pose-item{border:1px solid #243954;border-radius:10px;padding:10px;background:#0b1728}
+    .pose-label{display:block;color:#9fb2c9;font-size:.75rem;margin-bottom:5px}
+    .pose-value{display:block;color:#edf6ff;font-size:1.2rem;font-weight:700;font-variant-numeric:tabular-nums}
     output{color:var(--accent);font-variant-numeric:tabular-nums}
+    .slider-row{display:grid;grid-template-columns:minmax(0,1fr) 92px;gap:10px;align-items:center}
+    .slider-row input[type=number]{margin:0;text-align:center}
     input[type=range]{width:100%;height:40px;accent-color:var(--accent)}
     input[type=number],input[type=text]{width:100%;padding:12px;border-radius:10px;border:1px solid #3b4b65;background:#0b1728;color:white;font-size:1rem;margin:8px 0}
     .buttons{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}
@@ -38,7 +44,7 @@ const char CONTROL_PAGE[] PROGMEM = R"HTML(
     .record-actions.visible{display:grid}.record-actions button{min-height:60px;font-size:1.05rem}
     body.recording-active main{padding-bottom:110px}
     small{display:block;text-align:center;color:#8293aa;margin-top:18px}
-    @media(max-width:650px){.grid{grid-template-columns:1fr}.buttons{grid-template-columns:1fr 1fr}.status{font-size:.9rem}}
+    @media(max-width:650px){.grid{grid-template-columns:1fr}.buttons{grid-template-columns:1fr 1fr}.status{font-size:.9rem}.pose-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
   </style>
 </head>
 <body><main>
@@ -46,8 +52,22 @@ const char CONTROL_PAGE[] PROGMEM = R"HTML(
   <p class="sub">Drag and hold a joystick to move. Release it to stop.</p>
   <div class="card status"><span><i class="dot" id="dot"></i><b id="state">Arm enabled</b></span><span id="message">Ready</span></div>
   <div class="card">
+    <h2>Calibrated pose</h2>
+    <div class="pose-grid">
+      <div class="pose-item"><span class="pose-label">X</span><span class="pose-value" id="poseX">-- mm</span></div>
+      <div class="pose-item"><span class="pose-label">Y</span><span class="pose-value" id="poseY">-- mm</span></div>
+      <div class="pose-item"><span class="pose-label">Z</span><span class="pose-value" id="poseZ">-- mm</span></div>
+      <div class="pose-item"><span class="pose-label">Rx</span><span class="pose-value" id="poseRx">--°</span></div>
+      <div class="pose-item"><span class="pose-label">Ry</span><span class="pose-value" id="poseRy">--°</span></div>
+      <div class="pose-item"><span class="pose-label">Rz</span><span class="pose-value" id="poseRz">--°</span></div>
+    </div>
+  </div>
+  <div class="card">
     <div class="joint-head"><label for="speed">Movement speed</label><output id="speedValue">30%</output></div>
-    <input id="speed" type="range" min="1" max="60" step="1" value="30">
+    <div class="slider-row">
+      <input id="speed" type="range" min="1" max="60" step="1" value="30">
+      <input id="speedInput" type="number" min="1" max="60" step="1" value="30">
+    </div>
   </div>
   <section class="grid">
     <div class="card pad-card">
@@ -64,7 +84,10 @@ const char CONTROL_PAGE[] PROGMEM = R"HTML(
   <div class="card">
     <h2>Elbow</h2>
     <div class="joint-head"><span>Bend / straighten</span><output id="elbowValue">0°</output></div>
-    <input id="elbow" type="range" min="0" max="155" step="1" value="0">
+    <div class="slider-row">
+      <input id="elbow" type="range" min="0" max="155" step="1" value="0">
+      <input id="elbowInput" type="number" min="0" max="155" step="1" value="0">
+    </div>
   </div>
   <div class="card">
     <h2>Gripper</h2>
@@ -79,6 +102,15 @@ const char CONTROL_PAGE[] PROGMEM = R"HTML(
     <p class="sub">Use these sliders when you need an exact joint angle.</p>
     <section id="joints"></section>
   </details>
+  <div class="card">
+    <h2>Test presets</h2>
+    <div class="buttons">
+      <button class="primary" onclick="preset('home')">Home</button>
+      <button onclick="preset('left')">Left</button>
+      <button onclick="preset('front')">Front</button>
+      <button onclick="preset('right')">Right</button>
+    </div>
+  </div>
   <div class="card">
     <div class="buttons">
       <button class="primary" onclick="action('home')">Home</button>
@@ -111,12 +143,24 @@ const names=['Base','Shoulder','Elbow','Wrist Pitch','Wrist Roll','Gripper'];
 const limits=[270,110,155,140,180,60];
 let angles=[0,0,0,0,0,0],requestBusy=false;
 const box=document.getElementById('joints');
-const speed=document.getElementById('speed'),speedValue=document.getElementById('speedValue');
-speed.oninput=()=>speedValue.textContent=`${speed.value}%`;
-speed.onchange=()=>send(`/speed?value=${speed.value}`);
+const speed=document.getElementById('speed'),speedInput=document.getElementById('speedInput'),speedValue=document.getElementById('speedValue');
+function clamp(value,minimum,maximum){return Math.max(minimum,Math.min(maximum,Math.round(Number(value)||0)))}
+function updateSpeedValue(value){
+  const next=clamp(value,1,60);
+  speed.value=next;speedInput.value=next;speedValue.textContent=`${next}%`;
+  return next;
+}
+speed.oninput=()=>updateSpeedValue(speed.value);
+speed.onchange=()=>send(`/speed?value=${updateSpeedValue(speed.value)}`);
+speedInput.onchange=()=>send(`/speed?value=${updateSpeedValue(speedInput.value)}`);
 names.forEach((name,i)=>{
   box.insertAdjacentHTML('beforeend',`<div class="joint"><div class="joint-head"><label for="j${i}">${name}</label><output id="v${i}">0°</output></div><input id="j${i}" type="range" min="0" max="${limits[i]}" step="1" value="0"></div>`);
   const slider=document.getElementById(`j${i}`),value=document.getElementById(`v${i}`);
+  const number=document.createElement('input');
+  number.type='number';number.min='0';number.max=String(limits[i]);number.step='1';number.value='0';
+  slider.insertAdjacentElement('afterend',number);
+  number.onchange=()=>setDegree(i,number.value);
+  slider.addEventListener('input',()=>{number.value=slider.value});
   slider.oninput=()=>value.textContent=`${slider.value}°`;
   slider.onchange=()=>setDegree(i,Number(slider.value));
 });
@@ -128,20 +172,35 @@ async function send(url){
 function updateAngles(next){
   angles=next.map(Number);
   angles.forEach((angle,i)=>{
-    const slider=document.getElementById(`j${i}`),value=document.getElementById(`v${i}`);
+    const slider=document.getElementById(`j${i}`),number=slider.nextElementSibling,value=document.getElementById(`v${i}`);
+    if(number)number.value=angle;
     slider.value=angle;value.textContent=`${angle}°`;
   });
   document.getElementById('elbow').value=angles[2];
+  document.getElementById('elbowInput').value=angles[2];
   document.getElementById('elbowValue').textContent=`${angles[2]}°`;
   document.getElementById('gripperValue').textContent=`${angles[5]}°`;
 }
+function updatePose(pose){
+  if(!pose)return;
+  document.getElementById('poseX').textContent=`${pose.x} mm`;
+  document.getElementById('poseY').textContent=`${pose.y} mm`;
+  document.getElementById('poseZ').textContent=`${pose.z} mm`;
+  document.getElementById('poseRx').textContent=`${pose.rx}°`;
+  document.getElementById('poseRy').textContent=`${pose.ry}°`;
+  document.getElementById('poseRz').textContent=`${pose.rz}°`;
+}
+function updateState(data){
+  updateAngles(data.degrees);
+  updatePose(data.pose);
+}
 async function loadState(){
-  try{const data=await(await fetch('/state')).json();updateAngles(data.degrees)}
+  try{const data=await(await fetch('/state',{cache:'no-store'})).json();updateState(data)}
   catch(e){document.getElementById('message').textContent='Connection lost'}
 }
 async function setDegree(joint,degree){
   degree=Math.max(0,Math.min(limits[joint],Math.round(degree)));
-  if(await send(`/set?joint=${joint}&degree=${degree}`)){angles[joint]=degree;updateAngles(angles)}
+  if(await send(`/set?joint=${joint}&degree=${degree}`))loadState();
 }
 async function jog(j1,d1,j2,d2){
   if(requestBusy||(!d1&&!d2))return;
@@ -150,7 +209,7 @@ async function jog(j1,d1,j2,d2){
   if(j2!==undefined)url+=`&j2=${j2}&d2=${d2}`;
   try{
     const r=await fetch(url),data=await r.json();
-    updateAngles(data.degrees);document.getElementById('message').textContent='Moving';
+    updateState(data);document.getElementById('message').textContent='Moving';
   }catch(e){document.getElementById('message').textContent='Connection lost'}
   requestBusy=false;
 }
@@ -179,9 +238,11 @@ function makeJoystick(id,xJoint,yJoint){
 }
 makeJoystick('armPad',0,1);
 makeJoystick('wristPad',4,3);
-const elbow=document.getElementById('elbow');
+const elbow=document.getElementById('elbow'),elbowInput=document.getElementById('elbowInput');
+elbow.addEventListener('input',()=>{elbowInput.value=elbow.value});
 elbow.oninput=()=>document.getElementById('elbowValue').textContent=`${elbow.value}°`;
 elbow.onchange=()=>setDegree(2,Number(elbow.value));
+elbowInput.onchange=()=>setDegree(2,elbowInput.value);
 async function action(name){
   const ok=await send(`/action?name=${name}`),enabled=name!=='disable';
   if(name==='disable'||name==='enable'){
@@ -189,6 +250,9 @@ async function action(name){
     document.getElementById('dot').style.background=enabled?'#4ade80':'#fb7185';
   }
   if(ok&&name==='home')loadState();
+}
+async function preset(name){
+  if(await send(`/preset?name=${name}`))loadState();
 }
 function setRecordingControls(active){
   document.getElementById('recordButton').classList.toggle('recording',active);
@@ -258,6 +322,6 @@ async function loadRoutines(){
     list.innerHTML='<p class="sub">Could not load saved tasks.</p>';
   }
 }
-loadState();loadRoutines();
+loadState();loadRoutines();setInterval(loadState,1000);
 </script></body></html>
 )HTML";
